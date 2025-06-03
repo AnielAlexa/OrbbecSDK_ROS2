@@ -164,6 +164,7 @@ endif ()
 
 if (USE_NV_HW_DECODER)
   list(APPEND SOURCE_FILES src/jetson_nv_decoder.cpp)
+  list(APPEND SOURCE_FILES src/nvjpeg_decoder_manager.cpp)
   list(APPEND COMMON_INCLUDE_DIRS ${JETSON_MULTI_MEDIA_API_INCLUDE_DIR}
     ${LIBJPEG8B_INCLUDE_DIR})
   # append jetson_multimedia_api source files

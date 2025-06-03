@@ -29,6 +29,7 @@
 #include "orbbec_camera/rk_mpp_decoder.h"
 #elif defined(USE_NV_HW_DECODER)
 #include "orbbec_camera/jetson_nv_decoder.h"
+#include "orbbec_camera/nvjpeg_decoder_manager.h"
 #endif
 
 namespace orbbec_camera {
@@ -61,7 +62,24 @@ OBCameraNode::OBCameraNode(rclcpp::Node *node, std::shared_ptr<ob::Device> devic
 #if defined(USE_RK_HW_DECODER)
   jpeg_decoder_ = std::make_unique<RKJPEGDecoder>(width_[COLOR], height_[COLOR]);
 #elif defined(USE_NV_HW_DECODER)
-  jpeg_decoder_ = std::make_unique<JetsonNvJPEGDecoder>(width_[COLOR], height_[COLOR]);
+  // Create unique camera identifier from camera name and device serial number
+  auto device_info = device_->getDeviceInfo();
+  std::string camera_identifier = camera_name_ + "_" + device_info->serialNumber();
+  
+  // Try to acquire hardware decoder slot through resource manager
+  auto& decoder_manager = NvJpegDecoderManager::getInstance();
+  bool use_hardware = decoder_manager.acquireDecoderSlot(camera_identifier);
+  
+  if (use_hardware) {
+    RCLCPP_INFO_STREAM(logger_, "Using hardware NVJPEG decoder for camera: " << camera_identifier);
+    jpeg_decoder_ = std::make_unique<JetsonNvJPEGDecoder>(width_[COLOR], height_[COLOR]);
+    decoder_slot_acquired_ = true;
+    decoder_camera_id_ = camera_identifier;
+  } else {
+    RCLCPP_WARN_STREAM(logger_, "Hardware decoder slots exhausted, falling back to software decoding for camera: " << camera_identifier);
+    // Fallback to software decoding - we'll handle this in the decoding logic
+    decoder_slot_acquired_ = false;
+  }
 #endif
   if (enable_d2c_viewer_) {
     auto rgb_qos = getRMWQosProfileFromString(image_qos_[COLOR]);
@@ -123,6 +141,17 @@ void OBCameraNode::clean() noexcept {
   RCLCPP_WARN_STREAM(logger_, "stop streams");
   stopStreams();
   stopIMU();
+  
+#if defined(USE_NV_HW_DECODER)
+  // Release hardware decoder slot before cleaning up
+  if (decoder_slot_acquired_) {
+    auto& decoder_manager = NvJpegDecoderManager::getInstance();
+    decoder_manager.releaseDecoderSlot(decoder_camera_id_);
+    decoder_slot_acquired_ = false;
+    RCLCPP_INFO_STREAM(logger_, "Released hardware decoder slot for camera: " << decoder_camera_id_);
+  }
+#endif
+  
   if (rgb_buffer_) {
     delete[] rgb_buffer_;
     rgb_buffer_ = nullptr;
@@ -1938,18 +1967,36 @@ bool OBCameraNode::decodeColorFrameToBuffer(const std::shared_ptr<ob::Frame> &fr
 
 #if defined(USE_RK_HW_DECODER) || defined(USE_NV_HW_DECODER)
   if (frame && frame->format() != OB_FORMAT_RGB888) {
-    if (frame->format() == OB_FORMAT_MJPG && jpeg_decoder_) {
-      CHECK_NOTNULL(jpeg_decoder_.get());
-      CHECK_NOTNULL(rgb_buffer_);
-      auto video_frame = frame->as<ob::ColorFrame>();
-      bool ret = jpeg_decoder_->decode(video_frame, rgb_buffer_);
-      if (!ret) {
-        RCLCPP_ERROR_STREAM(logger_, "Decode frame failed");
-        is_decoded = false;
-
-      } else {
-        is_decoded = true;
+    if (frame->format() == OB_FORMAT_MJPG) {
+#if defined(USE_NV_HW_DECODER)
+      // For NVJPEG, check if we have hardware decoder available
+      if (jpeg_decoder_ && decoder_slot_acquired_) {
+        CHECK_NOTNULL(jpeg_decoder_.get());
+        CHECK_NOTNULL(rgb_buffer_);
+        auto video_frame = frame->as<ob::ColorFrame>();
+        bool ret = jpeg_decoder_->decode(video_frame, rgb_buffer_);
+        if (!ret) {
+          RCLCPP_ERROR_STREAM(logger_, "Hardware decode frame failed, falling back to software");
+          is_decoded = false;
+        } else {
+          is_decoded = true;
+        }
       }
+      // If no hardware decoder available or hardware decode failed, fall through to software
+#elif defined(USE_RK_HW_DECODER)
+      if (jpeg_decoder_) {
+        CHECK_NOTNULL(jpeg_decoder_.get());
+        CHECK_NOTNULL(rgb_buffer_);
+        auto video_frame = frame->as<ob::ColorFrame>();
+        bool ret = jpeg_decoder_->decode(video_frame, rgb_buffer_);
+        if (!ret) {
+          RCLCPP_ERROR_STREAM(logger_, "Decode frame failed");
+          is_decoded = false;
+        } else {
+          is_decoded = true;
+        }
+      }
+#endif
     }
   }
 #endif

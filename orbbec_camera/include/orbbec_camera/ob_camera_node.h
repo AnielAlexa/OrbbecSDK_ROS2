@@ -513,6 +513,10 @@ class OBCameraNode {
   std::shared_ptr<JPEGDecoder> jpeg_decoder_ = nullptr;
   uint8_t* rgb_buffer_ = nullptr;
   bool is_color_frame_decoded_ = false;
+#if defined(USE_NV_HW_DECODER)
+  bool decoder_slot_acquired_ = false;
+  std::string decoder_camera_id_;
+#endif
   std::mutex device_lock_;
   // For color
   std::queue<std::shared_ptr<ob::FrameSet>> color_frame_queue_;
